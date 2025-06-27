@@ -2,7 +2,8 @@
 #define __STD_TYPE_H__
 
 typedef unsigned char byte;
-typedef char bool;
+
+#define bool char
 #define true 1
 #define false 0
 #define SECTOR_SIZE 512
