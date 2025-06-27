@@ -1,103 +1,86 @@
+#include "filesystem.h"
 #include "kernel.h"
 #include "std_lib.h"
-#include "filesystem.h"
+#include "std_type.h"
 
-void fsInit() {
-    struct map_fs map_fs_buf;
-    int i = 0;
+struct map_fs __fs_map;
+struct node_fs __fs_nodes;
+struct data_fs __fs_data;
 
-    readSector(&map_fs_buf, FS_MAP_SECTOR_NUMBER);
-    for (i = 0; i < 16; i++) map_fs_buf.is_used[i] = true;
-    for (i = 256; i < 512; i++) map_fs_buf.is_used[i] = true;
-    writeSector(&map_fs_buf, FS_MAP_SECTOR_NUMBER);
+void fsInit(void) {
+    int i;
+    readSector(&__fs_map, FS_MAP_SECTOR_NUMBER);
+
+    if (!__fs_map.is_used[0]) {
+        for (i = 0; i < 16; i++) {
+            __fs_map.is_used[i] = true;
+        }
+        for (i = 256; i < SECTOR_SIZE; i++) {
+            __fs_map.is_used[i] = true;
+        }
+        writeSector(&__fs_map, FS_MAP_SECTOR_NUMBER);
+    }
+    
+    readSector(&__fs_nodes.nodes[0], FS_NODE_SECTOR_NUMBER);
+    readSector(&__fs_nodes.nodes[FS_MAX_NODE / FS_NODE_SECTOR_COUNT], FS_NODE_SECTOR_NUMBER + 1);
+    readSector(&__fs_data, FS_DATA_SECTOR_NUMBER);
 }
 
-// TODO: 2. Implement fsRead function [DONE]
 void fsRead(struct file_metadata* metadata, enum fs_return* status) {
-    struct node_fs node_fs_buf;
-    struct data_fs data_fs_buf;
-
     int i, j, data_idx;
 
-    // 1. Membaca filesystem dari disk ke memori
-    readSector(&data_fs_buf, FS_DATA_SECTOR_NUMBER);
-    readSector(&(node_fs_buf.nodes[0]), FS_NODE_SECTOR_NUMBER);
-    readSector(&(node_fs_buf.nodes[32]), FS_NODE_SECTOR_NUMBER + 1);
+    clear(metadata->buffer, FS_MAX_SECTOR * SECTOR_SIZE);
 
-    /* 2. Iterasi setiap item node untuk mencari node yang memiliki nama yang sesuai dengan metadata->node_name
-          dan parent index sesuai dengan metadata->parent_index.*/
     for (i = 0; i < FS_MAX_NODE; i++) {
-        if (strcmp(node_fs_buf.nodes[i].node_name, metadata->node_name) == 0 &&
-            node_fs_buf.nodes[i].parent_index == metadata->parent_index) {
+        if (__fs_nodes.nodes[i].parent_index == metadata->parent_index) {
+            if (strcmp(__fs_nodes.nodes[i].node_name, metadata->node_name) == 0) {
+                if (__fs_nodes.nodes[i].data_index == FS_NODE_D_DIR) {
+                    *status = FS_R_TYPE_IS_DIRECTORY;
+                    return;
+                }
 
-            // 4. Jika node yang ditemukan adalah direktori, maka set status dengan FS_R_TYPE_IS_DIRECTORY
-            if (node_fs_buf.nodes[i].data_index == FS_NODE_D_DIR) {
-                *status = FS_R_TYPE_IS_DIRECTORY;
+                metadata->filesize = 0;
+                data_idx = __fs_nodes.nodes[i].data_index;
+
+                if (data_idx >= FS_MAX_DATA || data_idx < 0) {
+                    *status = FS_R_NODE_NOT_FOUND;
+                    return;
+                }
+
+                for (j = 0; j < FS_MAX_SECTOR; j++) {
+                    if (__fs_data.datas[data_idx].sectors[j] == 0x00) {
+                        break;
+                    }
+                    readSector(metadata->buffer + j * SECTOR_SIZE, __fs_data.datas[data_idx].sectors[j]);
+                    metadata->filesize += SECTOR_SIZE;
+                }
+                *status = FS_R_SUCCESS;
                 return;
             }
-
-            // 5. Jika node yang ditemukan adalah file, maka proses selanjutnya adalah sebagai berikut.
-            // -- Set metadata->filesize dengan 0
-            metadata->filesize = 0;
-            data_idx = node_fs_buf.nodes[i].data_index;
-
-            // -- Lakukan iterasi i dari 0 hingga FS_MAX_SECTOR
-            for (j = 0; j < FS_MAX_SECTOR; j++) {
-                // -- Jika data index ke-i dari node yang ditemukan adalah 0x00, maka hentikan iterasi
-                if (data_fs_buf.datas[data_idx].sectors[j] == 0x00) break;
-
-                /* -- Lakukan readSector untuk membaca data dari sektor yang ditunjuk oleh data pada data index dengan
-                      sectors ke-i disimpan ke dalam metadata->buffer + i * SECTOR_SIZE */
-                readSector(metadata->buffer + j * SECTOR_SIZE, data_fs_buf.datas[data_idx].sectors[j]);
-
-                // -- Tambahkan SECTOR_SIZE ke metadata->filesize
-                metadata->filesize += SECTOR_SIZE;
-            }
-
-            // 6. Set status dengan FS_R_SUCCESS
-            *status = FS_SUCCESS;
-            return;
         }
     }
-
-    // 3. Jika node yang dicari tidak ditemukan, maka set status dengan FS_R_NODE_NOT_FOUND
     *status = FS_R_NODE_NOT_FOUND;
 }
 
-// TODO: 3. Implement fsWrite function
 void fsWrite(struct file_metadata* metadata, enum fs_return* status) {
-    struct map_fs map_fs_buf;
-    struct node_fs node_fs_buf;
-    struct data_fs data_fs_buf;
-
-    int i, j, k = 0;
+    int i, j;
     int empt_node_idx = -1;
     int empt_data_idx = -1;
     int empt_blocks_count = 0;
     int sector_blocks;
     byte sector_idx[FS_MAX_SECTOR];
+    clear(sector_idx, FS_MAX_SECTOR); // Ganti inisialisasi otomatis
 
-    // 1. Membaca filesystem dari disk ke memory
-    readSector(&map_fs_buf, FS_MAP_SECTOR_NUMBER);
-    readSector(&(node_fs_buf.nodes[0]), FS_NODE_SECTOR_NUMBER);
-    readSector(&(node_fs_buf.nodes[32]), FS_NODE_SECTOR_NUMBER + 1);
-    readSector(&data_fs_buf, FS_DATA_SECTOR_NUMBER);
-
-    /* 2. Lakukan iterasi setiap item node untuk mencari node yang memiliki nama yang sama dengan metadata->node_name
-          dan parent index yang sama dengan metadata->parent_index. Jika node yang dicari ditemukan, maka set status
-          dengan FS_R_NODE_ALREADY_EXISTS dan keluar */
     for (i = 0; i < FS_MAX_NODE; i++) {
-        if (strcmp(node_fs_buf.nodes[i].node_name, metadata->node_name) == 0 &&
-            node_fs_buf.nodes[i].parent_index == metadata->parent_index) {
+        if (strcmp(__fs_nodes.nodes[i].node_name, metadata->node_name) == 0 &&
+            __fs_nodes.nodes[i].parent_index == metadata->parent_index) {
             *status = FS_W_NODE_ALREADY_EXISTS;
             return;
         }
     }
 
-    /* 3. Selanjutnya, cari node yang kosong (nama node adalah string kosong) dan simpan index-nya. Jika node yang
-          kosong tidak ditemukan, maka set status dengan FS_W_NO_FREE_NODE dan keluar */
     for (i = 0; i < FS_MAX_NODE; i++) {
-        if (node_fs_buf.nodes[i].node_name[0] == '\0') {
+        if (__fs_nodes.nodes[i].node_name[0] == '\0') {
             empt_node_idx = i;
             break;
         }
@@ -108,10 +91,8 @@ void fsWrite(struct file_metadata* metadata, enum fs_return* status) {
         return;
     }
 
-    /* 4. Iterasi setiap item data untuk mencari data yang kosong (alamat sektor data ke-0 adalah 0x00) dan simpan
-          index-nya. Jika data yang kosong tidak ditemukan, maka set status dengan FS_W_NO_FREE_DATA dan keluar */
     for (i = 0; i < FS_MAX_DATA; i++) {
-        if (data_fs_buf.datas[i].sectors[0] == 0x00) {
+        if (__fs_data.datas[i].sectors[0] == 0x00) {
             empt_data_idx = i;
             break;
         }
@@ -122,13 +103,18 @@ void fsWrite(struct file_metadata* metadata, enum fs_return* status) {
         return;
     }
 
-    /* 5. Iterasi setiap item map dan hitung blok yang kosong (status blok adalah 0x00 atau false). Jika blok yang
-         kosong kurang dari metadata->filesize / SECTOR_SIZE, maka set status dengan FS_W_NOT_ENOUGH_SPACE dan keluar */
     sector_blocks = (metadata->filesize + SECTOR_SIZE - 1) / SECTOR_SIZE;
 
-    for (i = 0, j = 0; i < SECTOR_SIZE && j < sector_blocks; i++) {
-        if (!map_fs_buf.is_used[i]) {
-            sector_idx[j++] = i;
+    if (metadata->filesize == 0) {
+        sector_blocks = 0;
+    }
+    
+    empt_blocks_count = 0; 
+    for (i = 0; i < SECTOR_SIZE; i++) { 
+        if (!__fs_map.is_used[i] && i <= 0xFF) {
+            if (empt_blocks_count < sector_blocks) {
+                sector_idx[empt_blocks_count] = i;
+            }
             empt_blocks_count++;
         }
     }
@@ -138,30 +124,30 @@ void fsWrite(struct file_metadata* metadata, enum fs_return* status) {
         return;
     }
 
-    /* 6. Set nama dari node yang ditemukan dengan metadata->node_name, parent index dengan metadata->parent_index,
-          dan data index dengan index data yang kosong */
-    strcpy(node_fs_buf.nodes[empt_node_idx].node_name, metadata->node_name);
-    node_fs_buf.nodes[empt_node_idx].parent_index = metadata->parent_index;
-    node_fs_buf.nodes[empt_node_idx].data_index = empt_data_idx;
-
-    // 7. Lakukan penulisan data dengan cara sebagai berikut
-    // -- Lakukan iterasi i dari 0 hingga SECTOR_SIZE
-    for (i = 0; i < sector_blocks; i++) {
-        /* -- Jika item map pada index ke-i adalah 0x00, maka tulis index i ke dalam data item sektor ke-j dan tulis
-              data dari buffer ke dalam sektor ke-i */
-        data_fs_buf.datas[empt_data_idx].sectors[k] = sector_idx[i];
-        // -- Penulisan dapat menggunakan fungsi writeSector dari metadata->buffer + i * SECTOR_SIZE
-        writeSector(metadata->buffer + k * SECTOR_SIZE, sector_idx[i]);
-        // Tambahkan 1 ke j (jika disini adalah K)
-        k++;
+    strcpy(__fs_nodes.nodes[empt_node_idx].node_name, metadata->node_name);
+    __fs_nodes.nodes[empt_node_idx].parent_index = metadata->parent_index;
+    
+    if (metadata->filesize == 0) {
+        __fs_nodes.nodes[empt_node_idx].data_index = FS_NODE_D_DIR;
+    } else {
+        __fs_nodes.nodes[empt_node_idx].data_index = empt_data_idx;
     }
 
-    // 8. Tulis kembali filesystem yang telah diubah ke dalam disk
-    writeSector(&map_fs_buf, FS_MAP_SECTOR_NUMBER);
-    writeSector(&(node_fs_buf.nodes[0]), FS_NODE_SECTOR_NUMBER);
-    writeSector(&(node_fs_buf.nodes[32]), FS_NODE_SECTOR_NUMBER + 1);
-    writeSector(&data_fs_buf, FS_DATA_SECTOR_NUMBER);
+    if (metadata->filesize > 0) {
+        for (i = 0; i < sector_blocks; i++) {
+            __fs_map.is_used[sector_idx[i]] = true;
+            __fs_data.datas[empt_data_idx].sectors[i] = sector_idx[i];
+            writeSector(metadata->buffer + i * SECTOR_SIZE, sector_idx[i]);
+        }
+        for (i = sector_blocks; i < FS_MAX_SECTOR; i++) {
+            __fs_data.datas[empt_data_idx].sectors[i] = 0x00;
+        }
+    }
 
-    // 9. Set status dengan FS_W_SUCCESS
-    *status = FS_SUCCESS;
+    writeSector(&__fs_map, FS_MAP_SECTOR_NUMBER);
+    writeSector(&__fs_nodes.nodes[0], FS_NODE_SECTOR_NUMBER);
+    writeSector(&__fs_nodes.nodes[FS_MAX_NODE / FS_NODE_SECTOR_COUNT], FS_NODE_SECTOR_NUMBER + 1);
+    writeSector(&__fs_data, FS_DATA_SECTOR_NUMBER);
+
+    *status = FS_W_SUCCESS;
 }
