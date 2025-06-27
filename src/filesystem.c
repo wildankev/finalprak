@@ -1,3 +1,70 @@
+#include "kernel.h"
+#include "std_lib.h"
+#include "filesystem.h"
+
+void fsInit() {
+    struct map_fs map_fs_buf;
+    int i = 0;
+
+    readSector(&map_fs_buf, FS_MAP_SECTOR_NUMBER);
+    for (i = 0; i < 16; i++) map_fs_buf.is_used[i] = true;
+    for (i = 256; i < 512; i++) map_fs_buf.is_used[i] = true;
+    writeSector(&map_fs_buf, FS_MAP_SECTOR_NUMBER);
+}
+
+// TODO: 2. Implement fsRead function [DONE]
+void fsRead(struct file_metadata* metadata, enum fs_return* status) {
+    struct node_fs node_fs_buf;
+    struct data_fs data_fs_buf;
+
+    int i, j, data_idx;
+
+    // 1. Membaca filesystem dari disk ke memori
+    readSector(&data_fs_buf, FS_DATA_SECTOR_NUMBER);
+    readSector(&(node_fs_buf.nodes[0]), FS_NODE_SECTOR_NUMBER);
+    readSector(&(node_fs_buf.nodes[32]), FS_NODE_SECTOR_NUMBER + 1);
+
+    /* 2. Iterasi setiap item node untuk mencari node yang memiliki nama yang sesuai dengan metadata->node_name
+          dan parent index sesuai dengan metadata->parent_index.*/
+    for (i = 0; i < FS_MAX_NODE; i++) {
+        if (strcmp(node_fs_buf.nodes[i].node_name, metadata->node_name) == 0 &&
+            node_fs_buf.nodes[i].parent_index == metadata->parent_index) {
+
+            // 4. Jika node yang ditemukan adalah direktori, maka set status dengan FS_R_TYPE_IS_DIRECTORY
+            if (node_fs_buf.nodes[i].data_index == FS_NODE_D_DIR) {
+                *status = FS_R_TYPE_IS_DIRECTORY;
+                return;
+            }
+
+            // 5. Jika node yang ditemukan adalah file, maka proses selanjutnya adalah sebagai berikut.
+            // -- Set metadata->filesize dengan 0
+            metadata->filesize = 0;
+            data_idx = node_fs_buf.nodes[i].data_index;
+
+            // -- Lakukan iterasi i dari 0 hingga FS_MAX_SECTOR
+            for (j = 0; j < FS_MAX_SECTOR; j++) {
+                // -- Jika data index ke-i dari node yang ditemukan adalah 0x00, maka hentikan iterasi
+                if (data_fs_buf.datas[data_idx].sectors[j] == 0x00) break;
+
+                /* -- Lakukan readSector untuk membaca data dari sektor yang ditunjuk oleh data pada data index dengan
+                      sectors ke-i disimpan ke dalam metadata->buffer + i * SECTOR_SIZE */
+                readSector(metadata->buffer + j * SECTOR_SIZE, data_fs_buf.datas[data_idx].sectors[j]);
+
+                // -- Tambahkan SECTOR_SIZE ke metadata->filesize
+                metadata->filesize += SECTOR_SIZE;
+            }
+
+            // 6. Set status dengan FS_R_SUCCESS
+            *status = FS_SUCCESS;
+            return;
+        }
+    }
+
+    // 3. Jika node yang dicari tidak ditemukan, maka set status dengan FS_R_NODE_NOT_FOUND
+    *status = FS_R_NODE_NOT_FOUND;
+}
+
+// TODO: 3. Implement fsWrite function
 void fsWrite(struct file_metadata* metadata, enum fs_return* status) {
     struct map_fs map_fs_buf;
     struct node_fs node_fs_buf;
